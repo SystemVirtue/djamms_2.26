@@ -82,7 +82,7 @@ export interface PlayerSettings {
   freeplay: boolean;
   karaoke_mode?: boolean;
   coin_per_song: number;
-  branding: BrandingConfig;
+  branding: any;
   search_enabled: boolean;
   max_queue_size: number;
   priority_queue_limit: number;
@@ -253,7 +253,7 @@ export function subscribeToQueue(
   fetchQueue();
 
   // Subscribe to changes
-  return subscribeToTable<QueueItem>(
+  const queueSub = subscribeToTable<QueueItem>(
     'queue',
     { column: 'player_id', value: playerId },
     () => {
@@ -265,6 +265,29 @@ export function subscribeToQueue(
       }, 800); // Increased to 800ms to ensure all position updates complete
     }
   );
+
+  // Also refetch queue whenever player status changes (song transitions)
+  const statusChannel = supabase
+    .channel(`player_status_for_queue:${playerId}`)
+    .on('postgres_changes', {
+      event: '*',
+      schema: 'public',
+      table: 'player_status',
+      filter: `player_id=eq.${playerId}` 
+    }, () => {
+      console.log('[subscribeToQueue] Player status change detected, refetching queue...');
+      if (refetchTimeout) clearTimeout(refetchTimeout);
+      refetchTimeout = setTimeout(fetchQueue, 500);
+    })
+    .subscribe();
+
+  return {
+    channel: queueSub.channel,
+    unsubscribe: () => {
+      queueSub.unsubscribe();
+      supabase.removeChannel(statusChannel);
+    }
+  };
 }
 
 /**

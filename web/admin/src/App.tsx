@@ -281,10 +281,17 @@ function LoginForm({ onSignIn }: { onSignIn: (user: AuthUser) => void }) {
 // NOW PLAYING STAGE
 // ─────────────────────────────────────────────────────────────────────────────
 
-function NowPlayingStage({ status, queue, settings, onPlayPause, onSkip, isSkipping, onRemove }: {
-  status: PlayerStatus | null; queue: QueueItem[]; settings: PlayerSettings | null;
-  onPlayPause: () => void; onSkip: () => void; isSkipping: boolean; onRemove: (id: string) => void;
+function NowPlayingStage({ status, settings, onPlayPause, onSkip, onRemove }: {
+  status: PlayerStatus | null; settings: PlayerSettings | null;
+  onPlayPause: () => void; onSkip: () => void; onRemove: (id: string) => void;
 }) {
+  const [queue, setQueue] = useState<QueueItem[]>([]);
+  
+  useEffect(() => {
+    const sub = subscribeToQueue(PLAYER_ID, setQueue);
+    return () => sub.unsubscribe();
+  }, []);
+  
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const cm = (status as any)?.current_media as any;
   const thumb  = cm?.thumbnail || '';
@@ -293,8 +300,11 @@ function NowPlayingStage({ status, queue, settings, onPlayPause, onSkip, isSkipp
   const isPlaying = status?.state === 'playing';
   const progress  = Math.min(100, (status?.progress ?? 0) * 100);
 
-  const upNext   = queue.filter(q => q.media_item_id !== status?.current_media_id).slice(0, 3);
-  const priority = queue.filter(q => q.type === 'priority');
+  const upNext   = queue
+    .filter((q: QueueItem) => q.type === 'normal' && q.media_item_id !== (status as any)?.current_media?.id)
+    .sort((a: QueueItem, b: QueueItem) => a.position - b.position)
+    .slice(0, 2);
+  const priority = queue.filter((q: QueueItem) => q.type === 'priority');
 
   return (
     <div style={{ position: 'relative', height: '33vh', minHeight: 240, flexShrink: 0, overflow: 'hidden', background: '#050505' }}>
@@ -373,9 +383,9 @@ function NowPlayingStage({ status, queue, settings, onPlayPause, onSkip, isSkipp
               boxShadow: '0 4px 18px var(--accent-glow)' }}>
               {isPlaying ? '⏸' : '▶'}
             </button>
-            <button onClick={onSkip} disabled={isSkipping} style={{ width: 34, height: 34, borderRadius: 9, border: 'none', cursor: isSkipping ? 'default' : 'pointer',
-              background: 'rgba(255,255,255,0.07)', color: 'rgba(255,255,255,0.5)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 15, opacity: isSkipping ? 0.45 : 1 }}>
-              {isSkipping ? <Spinner size={14} /> : '⏭'}
+            <button onClick={onSkip} style={{ width: 34, height: 34, borderRadius: 9, border: 'none', cursor: 'pointer',
+              background: 'rgba(255,255,255,0.07)', color: 'rgba(255,255,255,0.5)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 15 }}>
+              ⏭
             </button>
             <div style={{ width: 1, height: 20, background: 'rgba(255,255,255,0.1)', margin: '0 4px' }} />
             <span style={{ fontSize: 13, color: 'rgba(255,255,255,0.38)' }}>🔊</span>
@@ -430,13 +440,18 @@ const NAV = [
   { id: 'logs',      icon: '📄', label: 'Logs',      children: [] as { id: ViewId; label: string }[] },
 ];
 
-function Sidebar({ view, setView, queue, user, onSignOut, brandingName }: {
-  view: ViewId; setView: (v: ViewId) => void;
-  queue: QueueItem[]; user: AuthUser; onSignOut: () => void;
-  brandingName?: string;
+function Sidebar({ view, setView, user, onSignOut, brandingName }: {
+  view: ViewId; setView: (v: ViewId) => void; user: AuthUser; onSignOut: () => void; brandingName?: string | undefined;
 }) {
   const [expanded, setExpanded] = useState(true);
   const [openGroup, setOpenGroup] = useState<string>('queue');
+  const [queue, setQueue] = useState<QueueItem[]>([]);
+  
+  useEffect(() => {
+    const sub = subscribeToQueue(PLAYER_ID, setQueue);
+    return () => sub.unsubscribe();
+  }, []);
+  
   const priorityCount = queue.filter(q => q.type === 'priority').length;
 
   const handleGroup = (group: typeof NAV[0]) => {
@@ -546,16 +561,103 @@ function SortableQueueItem({ item, onRemove }: { item: QueueItem; onRemove: (id:
   );
 }
 
-function QueuePanel({ view, queue, status, onRemove, onReorder, onShuffle, isShuffling }: {
-  view: ViewId; queue: QueueItem[]; status: PlayerStatus | null;
-  onRemove: (id: string) => void; onReorder: (e: DragEndEvent) => void;
-  onShuffle: () => void; isShuffling: boolean;
+function QueuePanel({ view, status }: {
+  view: ViewId; status: PlayerStatus | null;
 }) {
+  const [queue, setQueue] = useState<QueueItem[]>([]);
+  const [isShuffling, setIsShuffling] = useState(false);
+  const [isSkipping, setIsSkipping]  = useState(false);
   const sensors = useSensors(useSensor(PointerSensor), useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }));
+  
+  useEffect(() => {
+    const qSub = subscribeToQueue(PLAYER_ID, setQueue);
+    const sSub = subscribeToPlayerStatus(PLAYER_ID, (ns) => {
+      if (isSkipping && (ns.state === 'playing' || ns.state === 'loading')) {
+        setIsSkipping(false);
+      }
+    });
+    return () => { qSub.unsubscribe(); sSub.unsubscribe(); };
+  }, [isSkipping]);
+  
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const cm      = (status as any)?.current_media as any;
-  const normalQ   = queue.filter(q => q.type === 'normal'   && q.media_item_id !== status?.current_media_id);
-  const priorityQ = queue.filter(q => q.type === 'priority' && q.media_item_id !== status?.current_media_id);
+  const normalQ   = queue.filter((q: QueueItem) => q.type === 'normal'   && q.media_item_id !== (status as any)?.current_media?.id);
+  const priorityQ = queue.filter((q: QueueItem) => q.type === 'priority' && q.media_item_id !== (status as any)?.current_media?.id);
+
+  const handleRemove = async (queueId: string) => {
+    if (!queueId) {
+      console.error('queueId is undefined');
+      return;
+    }
+    try { await callQueueManager({ player_id: PLAYER_ID, action: 'remove', queue_id: queueId }); }
+    catch (e) { console.error(e); }
+  };
+
+  const handleReorder = async (event: DragEndEvent) => {
+    const { active, over } = event;
+    if (!over || active.id === over.id) return;
+    const normalQ = queue.filter((i: QueueItem) => i.type === 'normal' && i.media_item_id !== (status as any)?.current_media?.id && i.id);
+    const oldIdx  = normalQ.findIndex((i: QueueItem) => i.id === active.id);
+    const newIdx  = normalQ.findIndex((i: QueueItem) => i.id === over.id);
+    const reordered = arrayMove(normalQ, oldIdx, newIdx);
+    const priority  = queue.filter((i: QueueItem) => i.type === 'priority');
+    const current   = queue.filter((i: QueueItem) => i.media_item_id === (status as any)?.current_media?.id);
+    setQueue([...current, ...priority, ...reordered]); // optimistic
+    try {
+      await callQueueManager({
+        action: 'reorder',
+        player_id: PLAYER_ID,
+        queue_ids: reordered.map((i: QueueItem) => i.id),
+        type: 'normal'
+      });
+    } catch (e) { console.error(e); setQueue(queue); }
+  };
+
+  const handleShuffle = async () => {
+    setIsShuffling(true);
+    try {
+      const normalQ = queue.filter((i: QueueItem) => i.type === 'normal' && i.media_item_id !== (status as any)?.current_media?.id && i.id);
+      if (normalQ.length <= 1) {
+        console.log('[Shuffle] Not enough items to shuffle');
+        return;
+      }
+      
+      // Create shuffled order
+      const shuffledIds = [...normalQ]
+        .map((item: QueueItem) => item.id)
+        .sort(() => Math.random() - 0.5);
+      
+      // Filter out any undefined ids
+      let ids = shuffledIds.filter((id: string) => id);
+      const maxAttempts = 5;
+      for (let attempt = 0; attempt < maxAttempts; attempt++) {
+        try {
+          await callQueueManager({
+            action: 'reorder',
+            player_id: PLAYER_ID,
+            queue_ids: ids,
+            type: 'normal'
+          });
+          break;
+        } catch (e: unknown) {
+          const msg = String((e as Error)?.message || e);
+          if (msg.includes('23505') && attempt < maxAttempts - 1) {
+            // Duplicate key — refetch and retry
+            const { data: latest } = await supabase.from('queue' as 'queue').select('*')
+              .eq('player_id', PLAYER_ID).is('played_at', null)
+              .order('type', { ascending: false }).order('position', { ascending: true });
+            const latestNormal = (latest || []).filter((i: QueueItem) => i.type === 'normal' && i.media_item_id !== (status as any)?.current_media?.id && i.id);
+            ids = [...latestNormal].sort(() => Math.random() - 0.5).map((i: QueueItem) => i.id).filter((id: string) => id);
+            await new Promise(r => setTimeout(r, 200 * Math.pow(2, attempt)));
+          } else if (attempt === maxAttempts - 1) {
+            console.error('[Shuffle] Failed to shuffle after', maxAttempts, 'attempts');
+          }
+        }
+      }
+    } finally {
+      setIsShuffling(false);
+    }
+  };
 
   if (view === 'queue-now') {
     return (
@@ -604,7 +706,7 @@ function QueuePanel({ view, queue, status, onRemove, onReorder, onShuffle, isShu
                   <div style={{ fontFamily: 'var(--font-display)', fontSize: 13, fontWeight: 500, color: '#fff', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{m?.title || 'Unknown'}</div>
                   <div style={{ fontSize: 11, color: '#60a5fa' }}>{item.requested_by || 'Kiosk'}</div>
                 </div>
-                <button onClick={() => onRemove(item.id)} style={{ width: 28, height: 28, borderRadius: 7, background: 'rgba(239,68,68,0.12)', border: 'none', cursor: 'pointer', color: '#f87171', fontSize: 12 }}>✕</button>
+                <button onClick={() => handleRemove(item.id)} style={{ width: 28, height: 28, borderRadius: 7, background: 'rgba(239,68,68,0.12)', border: 'none', cursor: 'pointer', color: '#f87171', fontSize: 12 }}>✕</button>
               </div>
             );})}
         </div>
@@ -616,14 +718,14 @@ function QueuePanel({ view, queue, status, onRemove, onReorder, onShuffle, isShu
   return (
     <div style={{ height: '100%', display: 'flex', flexDirection: 'column' }}>
       <PanelHeader title="Up Next" subtitle={`${normalQ.length} songs in queue`}
-        actions={<Btn variant="accent" onClick={onShuffle} disabled={isShuffling}>{isShuffling ? <><Spinner size={12} /> Shuffling…</> : '🔀 Shuffle'}</Btn>}
+        actions={<Btn variant="accent" onClick={handleShuffle} disabled={isShuffling}>{isShuffling ? <><Spinner size={12} /> Shuffling…</> : '🔀 Shuffle'}</Btn>}
       />
       <div style={{ flex: 1, overflowY: 'auto', padding: '12px 16px' }}>
         {normalQ.length === 0
           ? <div style={{ color: 'rgba(255,255,255,0.25)', fontFamily: 'var(--font-mono)', fontSize: 12, textAlign: 'center', paddingTop: 40 }}>Queue is empty</div>
-          : <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={onReorder}>
+          : <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={handleReorder}>
               <SortableContext items={normalQ.map(i => i.id)} strategy={verticalListSortingStrategy}>
-                {normalQ.map(item => <SortableQueueItem key={item.id} item={item} onRemove={onRemove} />)}
+                {normalQ.map(item => <SortableQueueItem key={item.id} item={item} onRemove={handleRemove} />)}
               </SortableContext>
             </DndContext>
         }
@@ -1357,11 +1459,8 @@ function App() {
   const [user, setUser]         = useState<AuthUser | null>(null);
   const [authLoading, setAuthLoading] = useState(true);
   const [view, setView]         = useState<ViewId>('queue-next');
-  const [queue, setQueue]       = useState<QueueItem[]>([]);
   const [status, setStatus]     = useState<PlayerStatus | null>(null);
   const [settings, setSettings] = useState<PlayerSettings | null>(null);
-  const [isShuffling, setIsShuffling] = useState(false);
-  const [isSkipping,  setIsSkipping]  = useState(false);
 
   const prefs = usePrefs();
 
@@ -1373,88 +1472,19 @@ function App() {
   }, []);
 
   // Realtime subscriptions
+  // Effect 1: stable subscriptions — only recreate when user changes
   useEffect(() => {
     if (!user) return;
-    const q  = subscribeToQueue(PLAYER_ID, setQueue);
-    const s  = subscribeToPlayerStatus(PLAYER_ID, (ns) => {
-      setStatus(ns);
-      if (isSkipping && (ns.state === 'playing' || ns.state === 'loading')) setIsSkipping(false);
-    });
     const ps = subscribeToPlayerSettings(PLAYER_ID, setSettings);
-    return () => { q.unsubscribe(); s.unsubscribe(); ps.unsubscribe(); };
-  }, [user, isSkipping]);
+    return () => ps.unsubscribe();
+  }, [user]);
 
-  // ── Queue handlers ────────────────────────────────────────────────────────
-  const handleRemove = async (queueId: string) => {
-    if (!queueId) {
-      console.error('queueId is undefined');
-      return;
-    }
-    try { await callQueueManager({ player_id: PLAYER_ID, action: 'remove', queue_id: queueId }); }
-    catch (e) { console.error(e); }
-  };
-
-  const handleReorder = async (event: DragEndEvent) => {
-    const { active, over } = event;
-    if (!over || active.id === over.id) return;
-    const normalQ = queue.filter(i => i.type === 'normal' && i.media_item_id !== status?.current_media_id && i.id);
-    const oldIdx  = normalQ.findIndex(i => i.id === active.id);
-    const newIdx  = normalQ.findIndex(i => i.id === over.id);
-    const reordered = arrayMove(normalQ, oldIdx, newIdx);
-    const priority  = queue.filter(i => i.type === 'priority');
-    const current   = queue.filter(i => i.media_item_id === status?.current_media_id);
-    setQueue([...current, ...priority, ...reordered]); // optimistic
-    try {
-      const ids = Array.from(new Set(reordered.map(i => i.id)));
-      await callQueueManager({ player_id: PLAYER_ID, action: 'reorder', queue_ids: ids, type: 'normal' });
-    } catch (e) { console.error(e); setQueue(queue); }
-  };
-
-  const handleShuffle = async () => {
-    setIsShuffling(true);
-    try {
-      const normalQ = queue.filter(i => i.type === 'normal' && i.media_item_id !== status?.current_media_id && i.id);
-      if (normalQ.length <= 1) {
-        console.log('[Shuffle] Not enough items to shuffle');
-        return;
-      }
-      
-      // Create shuffled order
-      const shuffledIds = [...normalQ]
-        .map(item => item.id)
-        .sort(() => Math.random() - 0.5);
-      
-      // Filter out any undefined ids
-      const ids = shuffledIds.filter(id => id);
-      const maxAttempts = 5;
-      for (let attempt = 0; attempt < maxAttempts; attempt++) {
-        try {
-          await callQueueManager({
-            action: 'reorder',
-            player_id: PLAYER_ID,
-            queue_ids: ids,
-            type: 'normal'
-          });
-          break;
-        } catch (e: unknown) {
-          const msg = String((e as Error)?.message || e);
-          if (msg.includes('23505') && attempt < maxAttempts - 1) {
-            // Duplicate key — refetch and retry
-            const { data: latest } = await supabase.from('queue' as 'queue').select('*')
-              .eq('player_id', PLAYER_ID).is('played_at', null)
-              .order('type', { ascending: false }).order('position', { ascending: true });
-            const latestNormal = (latest || []).filter((i: QueueItem) => i.type === 'normal' && i.media_item_id !== status?.current_media_id && i.id);
-            ids = [...latestNormal].sort(() => Math.random() - 0.5).map((i: QueueItem) => i.id).filter(id => id);
-            await new Promise(r => setTimeout(r, 200 * Math.pow(2, attempt)));
-          } else if (attempt === maxAttempts - 1) {
-            console.error('[Shuffle] Failed to shuffle after', maxAttempts, 'attempts');
-          }
-        }
-      }
-    } finally {
-      setIsShuffling(false);
-    }
-  };
+  // Effect 2: player status (no queue sub here)
+  useEffect(() => {
+    if (!user) return;
+    const s = subscribeToPlayerStatus(PLAYER_ID, setStatus);
+    return () => s.unsubscribe();
+  }, [user]);
 
   const handlePlayPause = async () => {
     try {
@@ -1464,11 +1494,8 @@ function App() {
   };
 
   const handleSkip = async () => {
-    if (isSkipping) return;
-    setIsSkipping(true);
     try { await callPlayerControl({ player_id: PLAYER_ID, state: 'idle', action: 'skip' }); }
-    catch (e) { console.error(e); setIsSkipping(false); }
-    setTimeout(() => setIsSkipping(false), 3000); // failsafe
+    catch (e) { console.error(e); }
   };
 
   // ── Render ────────────────────────────────────────────────────────────────
@@ -1491,23 +1518,19 @@ function App() {
       {/* Stage */}
       <NowPlayingStage
         status={status}
-        queue={queue}
         settings={settings}
         onPlayPause={handlePlayPause}
         onSkip={handleSkip}
-        isSkipping={isSkipping}
-        onRemove={handleRemove}
+        onRemove={() => {}}
       />
 
       {/* Body */}
       <div style={{ flex: 1, display: 'flex', overflow: 'hidden' }}>
-        <Sidebar view={view} setView={setView} queue={queue} user={user} onSignOut={() => signOut().catch(console.error)} brandingName={settings?.branding?.name} />
+        <Sidebar view={view} setView={setView} user={user} onSignOut={() => signOut().catch(console.error)} brandingName={settings?.branding?.name} />
 
         <main style={{ flex: 1, overflow: 'hidden', display: 'flex', flexDirection: 'column', background: 'var(--bg)' }}>
           {isQueueView && (
-            <QueuePanel view={view} queue={queue} status={status}
-              onRemove={handleRemove} onReorder={handleReorder}
-              onShuffle={handleShuffle} isShuffling={isShuffling} />
+            <QueuePanel view={view} status={status} />
           )}
           {isPlaylistView && <PlaylistsPanel view={view} />}
           {isScriptsView  && <ScriptsPanel />}
